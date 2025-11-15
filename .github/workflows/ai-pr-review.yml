@@ -1,82 +1,77 @@
-name: AI Code Review
+name: AI PR Review
 
 on:
   pull_request:
     types: [opened, synchronize, reopened]
 
-  push:
-    branches:
-      - "**"
-
-  workflow_dispatch:
-
 jobs:
-  ai_review:
+  ai-review:
     runs-on: ubuntu-latest
 
+    permissions:
+      contents: read
+      pull-requests: write
+
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
+      - name: Checkout PR code
+        uses: actions/checkout@v4
 
-      # Detect correct refs
-      - name: Determine base
-        id: refs
+      - name: Install dependencies
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            echo "base_ref=${{ github.base_ref }}" >> $GITHUB_OUTPUT
-          else
-            echo "base_ref=HEAD~1" >> $GITHUB_OUTPUT
-          fi
+          python3 -m venv venv
+          source venv/bin/activate
+          pip install google-generativeai PyGithub
 
-      # Generate diff
-      - name: Generate diff
+      - name: Run AI Code Review
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO_NAME: ${{ github.repository }}
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            git fetch origin ${{ github.base_ref }} || true
-            git diff origin/${{ github.base_ref }}...HEAD > pr_diff.txt || true
-          else
-            git diff HEAD~1 HEAD > pr_diff.txt || true
-          fi
+          source venv/bin/activate
+          python3 << 'EOF'
+import os
+from github import Github
+import google.generativeai as genai
 
-          echo "=== DIFF START ==="
-          cat pr_diff.txt
-          echo "=== DIFF END ==="
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+g = Github(os.getenv("GITHUB_TOKEN"))
 
-      - name: Install jq
-        run: sudo apt-get install -y jq
+repo = g.get_repo(os.getenv("REPO_NAME"))
+pr = repo.get_pull(int(os.getenv("PR_NUMBER")))
 
-      # AI Review using Gemini
-      - name: AI Code Review using Gemini API
-        id: review
-        run: |
-          DIFF_CONTENT=$(cat pr_diff.txt)
+# Collect PR diff
+diff_text = pr.get_files()
+changed_code = ""
 
-          if [ -z "$DIFF_CONTENT" ]; then
-            echo "No diff to review" > review.md
-            exit 0
-          fi
+for f in diff_text:
+    patch = f.patch if f.patch else ""
+    changed_code += f"File: {f.filename}\n{patch}\n\n"
 
-          # Build JSON payload safely
-          PAYLOAD=$(printf '%s' \
-          "{
-            \"contents\": [{
-              \"parts\": [{
-                \"text\": \"Review this diff as a senior engineer. Identify bugs, issues, improvements, security concerns:\n\n$DIFF_CONTENT\"
-              }]
-            }]
-          }")
+prompt = f"""
+You are a senior code reviewer.
+Review the following Pull Request diff and give:
+- Code issues
+- Bugs
+- Improvements
+- Security issues
+- Better naming suggestions
+- Performance improvements
 
-          RESPONSE=$(curl -s -X POST \
-            -H "Content-Type: application/json" \
-            -H "x-goog-api-key: ${{ secrets.GEMINI_API_KEY }}" \
-            -d "$PAYLOAD" \
-            https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent)
+Respond in short bullet points.
+Here is the diff:
 
-          echo "$RESPONSE" | jq -r '.candidates[0].content.parts[0].text' > review.md
+{changed_code}
+"""
 
-      - name: Comment on Pull Request
-        if: github.event_name == 'pull_request'
-        uses: marocchino/sticky-pull-request-comment@v2
-        with:
-          header: AI Code Review
-          path: review.md
+model = genai.GenerativeModel("gemini-1.5-flash")
+response = model.generate_content(prompt)
+
+review_comment = response.text
+
+# Post review as PR comment
+pr.create_issue_comment(f"### 🤖 AI Code Review\n\n{review_comment}")
+
+print("AI Review posted successfully!")
+EOF
