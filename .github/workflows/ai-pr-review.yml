@@ -37,10 +37,16 @@ jobs:
 
           print("🔍 Running AI Review...")
 
-          # Configure APIs
+          # Configure Gemini API
           genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
           
-          # Fix 1: Use new Auth method for PyGithub
+          # List available models (for debugging)
+          print("📋 Available models:")
+          for m in genai.list_models():
+              if 'generateContent' in m.supported_generation_methods:
+                  print(f"  - {m.name}")
+          
+          # Configure GitHub API with new Auth method
           auth = Auth.Token(os.getenv("GITHUB_TOKEN"))
           g = Github(auth=auth)
 
@@ -68,18 +74,18 @@ jobs:
               print("No code changes to review")
               sys.exit(0)
 
-          # Limit the diff size to avoid token limits
-          if len(changed_code) > 30000:
-              changed_code = changed_code[:30000] + "\n\n... (diff truncated due to size)"
+          # Limit the diff size to avoid token limits (especially important for free tier)
+          if len(changed_code) > 20000:  # Reduced limit for free tier
+              changed_code = changed_code[:20000] + "\n\n... (diff truncated due to size)"
 
           prompt = f"""
           You are an expert code reviewer. Review this PR diff and provide feedback.
 
-          Focus on:
-          - 🐛 Bugs and potential issues
-          - 🔒 Security concerns
-          - ⚡ Performance improvements
-          - 🎨 Code quality and best practices
+          Please be concise but thorough. Focus on:
+          - 🐛 Critical bugs or logic errors
+          - 🔒 Security vulnerabilities
+          - ⚡ Major performance issues
+          - 🎨 Significant code quality problems
 
           PR Statistics:
           - Files changed: {file_count}
@@ -88,12 +94,36 @@ jobs:
 
           PR Diff:
           {changed_code}
+
+          Provide your review in a clear, bulleted format.
           """
 
           try:
-              # Fix 2: Use correct model name - either gemini-pro or gemini-1.5-pro
-              model = genai.GenerativeModel("gemini-pro")
-              # Alternative: model = genai.GenerativeModel("gemini-1.5-pro")
+              # Use the correct model for free tier
+              # Try different model names based on what's available
+              model_names = [
+                  "models/gemini-1.5-flash-latest",  # Most likely for free tier
+                  "models/gemini-1.5-flash",
+                  "models/gemini-1.5-pro-latest",
+                  "gemini-1.5-flash-latest",
+                  "gemini-1.5-flash",
+              ]
+              
+              model = None
+              for model_name in model_names:
+                  try:
+                      print(f"🔧 Trying model: {model_name}")
+                      model = genai.GenerativeModel(model_name)
+                      # Test if model works
+                      test_response = model.generate_content("test")
+                      print(f"✅ Using model: {model_name}")
+                      break
+                  except Exception as e:
+                      print(f"  ❌ {model_name} failed: {str(e)[:100]}")
+                      continue
+              
+              if model is None:
+                  raise Exception("No compatible model found. Please check your API key and available models.")
               
               response = model.generate_content(prompt)
               
@@ -108,7 +138,7 @@ jobs:
 
           ---
 
-          *This is an automated review. Please verify suggestions before implementing.*
+          *This is an automated review by Gemini AI (Free Tier). Please verify suggestions before implementing.*
           """
               
               pr.create_issue_comment(comment)
@@ -119,15 +149,16 @@ jobs:
               # Post a simple comment if AI review fails
               fallback_comment = f"""### 🤖 AI Code Review
 
-          Unable to generate detailed review at this time.
-          Error: {str(e)}
-
+          Unable to generate AI review at this time.
+          
           **PR Summary:** {file_count} file(s) changed (+{total_additions} / -{total_deletions} lines)
 
-          Please ensure:
-          - Code follows project conventions
-          - Changes are well-tested
-          - No security vulnerabilities introduced
+          Manual review checklist:
+          - [ ] No critical bugs or logic errors
+          - [ ] No security vulnerabilities
+          - [ ] Performance is acceptable
+          - [ ] Code follows project standards
+          - [ ] Tests are included/updated
           """
               pr.create_issue_comment(fallback_comment)
               sys.exit(1)
