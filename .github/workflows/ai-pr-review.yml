@@ -16,7 +16,7 @@ jobs:
       - name: Checkout PR code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # Fetch all history for proper diff
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -32,14 +32,17 @@ jobs:
           cat > ai_review.py << 'SCRIPT_END'
           import os
           import sys
-          from github import Github
+          from github import Github, Auth
           import google.generativeai as genai
 
           print("🔍 Running AI Review...")
 
           # Configure APIs
           genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-          g = Github(os.getenv("GITHUB_TOKEN"))
+          
+          # Fix 1: Use new Auth method for PyGithub
+          auth = Auth.Token(os.getenv("GITHUB_TOKEN"))
+          g = Github(auth=auth)
 
           # Get PR details
           repo = g.get_repo(os.getenv("REPO_NAME"))
@@ -70,23 +73,13 @@ jobs:
               changed_code = changed_code[:30000] + "\n\n... (diff truncated due to size)"
 
           prompt = f"""
-          You are an expert code reviewer. Review this PR diff and provide actionable feedback.
-
-          IMPORTANT: Format your response with clear sections and specific line references where possible.
-
-          For each issue found, provide:
-          1. The specific problem
-          2. Why it's important
-          3. A concrete suggestion or code example to fix it
+          You are an expert code reviewer. Review this PR diff and provide feedback.
 
           Focus on:
-          - 🐛 **Bugs**: Logic errors, potential crashes, edge cases
-          - 🔒 **Security**: Vulnerabilities, unsafe practices, data exposure
-          - ⚡ **Performance**: Inefficiencies, memory leaks, optimization opportunities
-          - 🎨 **Code Quality**: Naming, structure, readability, maintainability
-          - ✅ **Best Practices**: Design patterns, error handling, testing needs
-
-          If the code looks good, mention the positives too.
+          - 🐛 Bugs and potential issues
+          - 🔒 Security concerns
+          - ⚡ Performance improvements
+          - 🎨 Code quality and best practices
 
           PR Statistics:
           - Files changed: {file_count}
@@ -98,7 +91,10 @@ jobs:
           """
 
           try:
-              model = genai.GenerativeModel("gemini-1.5-flash")
+              # Fix 2: Use correct model name - either gemini-pro or gemini-1.5-pro
+              model = genai.GenerativeModel("gemini-pro")
+              # Alternative: model = genai.GenerativeModel("gemini-1.5-pro")
+              
               response = model.generate_content(prompt)
               
               # Format the comment
@@ -119,11 +115,12 @@ jobs:
               print("✅ AI Review posted successfully!")
               
           except Exception as e:
-              print(f"❌ Error during review: {e}")
+              print(f"❌ Error during review: {str(e)}")
               # Post a simple comment if AI review fails
               fallback_comment = f"""### 🤖 AI Code Review
 
           Unable to generate detailed review at this time.
+          Error: {str(e)}
 
           **PR Summary:** {file_count} file(s) changed (+{total_additions} / -{total_deletions} lines)
 
