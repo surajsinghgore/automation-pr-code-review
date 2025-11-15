@@ -40,12 +40,6 @@ jobs:
           # Configure Gemini API
           genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
           
-          # List available models (for debugging)
-          print("📋 Available models:")
-          for m in genai.list_models():
-              if 'generateContent' in m.supported_generation_methods:
-                  print(f"  - {m.name}")
-          
           # Configure GitHub API with new Auth method
           auth = Auth.Token(os.getenv("GITHUB_TOKEN"))
           g = Github(auth=auth)
@@ -74,18 +68,22 @@ jobs:
               print("No code changes to review")
               sys.exit(0)
 
-          # Limit the diff size to avoid token limits (especially important for free tier)
-          if len(changed_code) > 20000:  # Reduced limit for free tier
+          # Limit the diff size for free tier token limits
+          if len(changed_code) > 20000:
               changed_code = changed_code[:20000] + "\n\n... (diff truncated due to size)"
 
-          prompt = f"""
-          You are an expert code reviewer. Review this PR diff and provide feedback.
+          prompt = f"""You are an expert code reviewer. Review this PR diff and provide actionable feedback.
 
-          Please be concise but thorough. Focus on:
-          - 🐛 Critical bugs or logic errors
-          - 🔒 Security vulnerabilities
-          - ⚡ Major performance issues
-          - 🎨 Significant code quality problems
+          Focus on:
+          - 🐛 **Bugs**: Logic errors, potential crashes, edge cases
+          - 🔒 **Security**: Vulnerabilities, unsafe practices
+          - ⚡ **Performance**: Inefficiencies, optimization opportunities
+          - 🎨 **Code Quality**: Naming, structure, best practices
+
+          Be concise but specific. For each issue, mention:
+          1. What the problem is
+          2. Which file/line it affects
+          3. How to fix it
 
           PR Statistics:
           - Files changed: {file_count}
@@ -94,41 +92,16 @@ jobs:
 
           PR Diff:
           {changed_code}
-
-          Provide your review in a clear, bulleted format.
           """
 
           try:
-              # Use the correct model for free tier
-              # Try different model names based on what's available
-              model_names = [
-                  "models/gemini-1.5-flash-latest",  # Most likely for free tier
-                  "models/gemini-1.5-flash",
-                  "models/gemini-1.5-pro-latest",
-                  "gemini-1.5-flash-latest",
-                  "gemini-1.5-flash",
-              ]
-              
-              model = None
-              for model_name in model_names:
-                  try:
-                      print(f"🔧 Trying model: {model_name}")
-                      model = genai.GenerativeModel(model_name)
-                      # Test if model works
-                      test_response = model.generate_content("test")
-                      print(f"✅ Using model: {model_name}")
-                      break
-                  except Exception as e:
-                      print(f"  ❌ {model_name} failed: {str(e)[:100]}")
-                      continue
-              
-              if model is None:
-                  raise Exception("No compatible model found. Please check your API key and available models.")
+              # Use the correct model for free tier - gemini-2.5-flash
+              model = genai.GenerativeModel("models/gemini-2.5-flash")
               
               response = model.generate_content(prompt)
               
               # Format the comment
-              comment = f"""### 🤖 AI Code Review
+              comment = f"""### 🤖 AI Code Review (Gemini 2.5 Flash)
 
           **PR Summary:** {file_count} file(s) changed (+{total_additions} / -{total_deletions} lines)
 
@@ -138,7 +111,8 @@ jobs:
 
           ---
 
-          *This is an automated review by Gemini AI (Free Tier). Please verify suggestions before implementing.*
+          *This is an automated review. Please verify suggestions before implementing.*
+          *React with 👍 if helpful, 👎 if not useful.*
           """
               
               pr.create_issue_comment(comment)
@@ -149,16 +123,18 @@ jobs:
               # Post a simple comment if AI review fails
               fallback_comment = f"""### 🤖 AI Code Review
 
-          Unable to generate AI review at this time.
+          Unable to generate detailed AI review.
           
           **PR Summary:** {file_count} file(s) changed (+{total_additions} / -{total_deletions} lines)
 
           Manual review checklist:
           - [ ] No critical bugs or logic errors
-          - [ ] No security vulnerabilities
+          - [ ] No security vulnerabilities  
           - [ ] Performance is acceptable
           - [ ] Code follows project standards
           - [ ] Tests are included/updated
+          
+          Error details: {str(e)[:200]}
           """
               pr.create_issue_comment(fallback_comment)
               sys.exit(1)
