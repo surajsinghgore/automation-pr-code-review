@@ -9,43 +9,59 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # Step 1 — Checkout PR Code
+      # 1. Checkout repository
       - name: Checkout repository
         uses: actions/checkout@v3
 
-      # Step 2 — Get PR diff
+      # 2. Get PR diff correctly (fixed)
       - name: Get PR Diff
         id: diff
         run: |
-          git fetch origin ${{ github.base_ref }}
-          git diff origin/${{ github.base_ref }}...HEAD > pr_diff.txt
+          echo "Base branch: ${{ github.base_ref }}"
 
-      # Step 3 — Install curl + jq
+          # Fetch the base branch safely
+          git fetch origin ${{ github.base_ref }} || true
+
+          # Generate diff between base branch and PR branch
+          git diff origin/${{ github.base_ref }}...HEAD > pr_diff.txt || true
+
+          echo "==== DIFF START ===="
+          cat pr_diff.txt
+          echo "==== DIFF END ===="
+
+      # 3. Install jq (needed to parse JSON)
       - name: Install tools
         run: sudo apt-get install -y jq
 
-      # Step 4 — Send diff to Gemini API and receive review
+      # 4. Send PR diff to Gemini AI for review
       - name: AI Code Review using Gemini API
         id: review
         run: |
-          REVIEW=$(curl -s -X POST \
-            -H "Content-Type: application/json" \
-            -H "x-goog-api-key: ${{ secrets.GEMINI_API_KEY }}" \
-            -d @<(cat <<EOF
-          {
-            "contents": [{
-              "parts":[{
-                "text": "You are a senior software engineer. Review this PR diff and provide issues, improvements, bugs, and suggestions:\n\n$(cat pr_diff.txt)"
+          DIFF_CONTENT=$(cat pr_diff.txt)
+
+          # If diff is empty, comment and skip AI call
+          if [ -z "$DIFF_CONTENT" ]; then
+            echo "No diff found" > review.md
+          else
+            RESPONSE=$(curl -s -X POST \
+              -H "Content-Type: application/json" \
+              -H "x-goog-api-key: ${{ secrets.GEMINI_API_KEY }}" \
+              -d @<(cat <<EOF
+            {
+              "contents": [{
+                "parts":[{
+                  "text": "Act as a senior software engineer. Review this PR diff and highlight issues, bugs, improvements, security concerns, coding standards, and refactoring suggestions:\n\n$DIFF_CONTENT"
+                }]
               }]
-            }]
-          }
-          EOF
-          ) \
-          https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent | jq -r '.candidates[0].content.parts[0].text')
+            }
+EOF
+              ) \
+              https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent)
 
-          echo "$REVIEW" > review.md
+            echo "$RESPONSE" | jq -r '.candidates[0].content.parts[0].text' > review.md
+          fi
 
-      # Step 5 — Post AI review as PR comment
+      # 5. Post the AI review as a PR comment
       - name: Comment on PR
         uses: marocchino/sticky-pull-request-comment@v2
         with:
