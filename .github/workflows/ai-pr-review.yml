@@ -15,6 +15,8 @@ jobs:
     steps:
       - name: Checkout PR code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history for proper diff
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -27,45 +29,112 @@ jobs:
 
       - name: Save AI script
         run: |
-          cat << 'EOF' > ai_review.py
-import os
-from github import Github
-import google.generativeai as genai
+          cat > ai_review.py << 'SCRIPT_END'
+          import os
+          import sys
+          from github import Github
+          import google.generativeai as genai
 
-print("🔍 Running AI Review...")
+          print("🔍 Running AI Review...")
 
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-g = Github(os.getenv("GITHUB_TOKEN"))
+          # Configure APIs
+          genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+          g = Github(os.getenv("GITHUB_TOKEN"))
 
-repo = g.get_repo(os.getenv("REPO_NAME"))
-pr = repo.get_pull(int(os.getenv("PR_NUMBER")))
+          # Get PR details
+          repo = g.get_repo(os.getenv("REPO_NAME"))
+          pr = repo.get_pull(int(os.getenv("PR_NUMBER")))
 
-changed_code = ""
+          # Collect changed code
+          changed_code = ""
+          file_count = 0
+          total_additions = 0
+          total_deletions = 0
 
-for f in pr.get_files():
-    patch = f.patch or ""
-    changed_code += f"File: {f.filename}\n{patch}\n\n"
+          for f in pr.get_files():
+              file_count += 1
+              total_additions += f.additions
+              total_deletions += f.deletions
+              
+              patch = f.patch or ""
+              if patch:
+                  changed_code += f"### File: {f.filename}\n```diff\n{patch}\n```\n\n"
 
-prompt = f"""
-You are a senior code reviewer. Review the following PR diff and list:
-- Bugs
-- Issues
-- Improvements
-- Best practices
-- Security issues
+          # Check if there are changes to review
+          if not changed_code:
+              print("No code changes to review")
+              sys.exit(0)
 
-Respond in bullet points.
+          # Limit the diff size to avoid token limits
+          if len(changed_code) > 30000:
+              changed_code = changed_code[:30000] + "\n\n... (diff truncated due to size)"
 
-PR Diff:
-{changed_code}
-"""
+          prompt = f"""
+          You are an expert code reviewer. Review this PR diff and provide actionable feedback.
 
-model = genai.GenerativeModel("gemini-1.5-flash")
-response = model.generate_content(prompt)
+          IMPORTANT: Format your response with clear sections and specific line references where possible.
 
-pr.create_issue_comment("### 🤖 AI Code Review\n\n" + response.text)
-print("✅ AI Review posted!")
-EOF
+          For each issue found, provide:
+          1. The specific problem
+          2. Why it's important
+          3. A concrete suggestion or code example to fix it
+
+          Focus on:
+          - 🐛 **Bugs**: Logic errors, potential crashes, edge cases
+          - 🔒 **Security**: Vulnerabilities, unsafe practices, data exposure
+          - ⚡ **Performance**: Inefficiencies, memory leaks, optimization opportunities
+          - 🎨 **Code Quality**: Naming, structure, readability, maintainability
+          - ✅ **Best Practices**: Design patterns, error handling, testing needs
+
+          If the code looks good, mention the positives too.
+
+          PR Statistics:
+          - Files changed: {file_count}
+          - Lines added: {total_additions}
+          - Lines deleted: {total_deletions}
+
+          PR Diff:
+          {changed_code}
+          """
+
+          try:
+              model = genai.GenerativeModel("gemini-1.5-flash")
+              response = model.generate_content(prompt)
+              
+              # Format the comment
+              comment = f"""### 🤖 AI Code Review
+
+          **PR Summary:** {file_count} file(s) changed (+{total_additions} / -{total_deletions} lines)
+
+          ---
+
+          {response.text}
+
+          ---
+
+          *This is an automated review. Please verify suggestions before implementing.*
+          """
+              
+              pr.create_issue_comment(comment)
+              print("✅ AI Review posted successfully!")
+              
+          except Exception as e:
+              print(f"❌ Error during review: {e}")
+              # Post a simple comment if AI review fails
+              fallback_comment = f"""### 🤖 AI Code Review
+
+          Unable to generate detailed review at this time.
+
+          **PR Summary:** {file_count} file(s) changed (+{total_additions} / -{total_deletions} lines)
+
+          Please ensure:
+          - Code follows project conventions
+          - Changes are well-tested
+          - No security vulnerabilities introduced
+          """
+              pr.create_issue_comment(fallback_comment)
+              sys.exit(1)
+          SCRIPT_END
 
       - name: Run AI Review Script
         env:
@@ -73,5 +142,4 @@ EOF
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO_NAME: ${{ github.repository }}
-        run: |
-          python ai_review.py
+        run: python ai_review.py
