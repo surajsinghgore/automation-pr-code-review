@@ -16,10 +16,14 @@ jobs:
       - name: Checkout PR code
         uses: actions/checkout@v4
 
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.x"
+
       - name: Install dependencies
         run: |
-          python3 -m venv venv
-          source venv/bin/activate
+          python -m pip install --upgrade pip
           pip install google-generativeai PyGithub
 
       - name: Run AI Code Review
@@ -29,49 +33,45 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO_NAME: ${{ github.repository }}
         run: |
-          source venv/bin/activate
-          python3 << 'EOF'
+          python << 'EOF'
 import os
 from github import Github
 import google.generativeai as genai
 
+# Configure Gemini
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-g = Github(os.getenv("GITHUB_TOKEN"))
 
+# Configure GitHub
+g = Github(os.getenv("GITHUB_TOKEN"))
 repo = g.get_repo(os.getenv("REPO_NAME"))
 pr = repo.get_pull(int(os.getenv("PR_NUMBER")))
 
-# Collect PR diff
-diff_text = pr.get_files()
 changed_code = ""
 
-for f in diff_text:
-    patch = f.patch if f.patch else ""
+for f in pr.get_files():
+    patch = f.patch or ""
     changed_code += f"File: {f.filename}\n{patch}\n\n"
 
 prompt = f"""
-You are a senior code reviewer.
-Review the following Pull Request diff and give:
-- Code issues
+You are an expert senior code reviewer.
+Review the following Pull Request changes and identify:
 - Bugs
-- Improvements
 - Security issues
-- Better naming suggestions
+- Bad practices
+- Code improvement suggestions
+- Naming improvements
 - Performance improvements
 
-Respond in short bullet points.
-Here is the diff:
+Respond in bullet points.
 
+PR Diff:
 {changed_code}
 """
 
 model = genai.GenerativeModel("gemini-1.5-flash")
 response = model.generate_content(prompt)
 
-review_comment = response.text
+pr.create_issue_comment(f"### 🤖 AI Code Review Result\n\n{response.text}")
 
-# Post review as PR comment
-pr.create_issue_comment(f"### 🤖 AI Code Review\n\n{review_comment}")
-
-print("AI Review posted successfully!")
+print("AI Review posted!")
 EOF
