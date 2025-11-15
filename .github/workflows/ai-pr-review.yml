@@ -16,7 +16,7 @@ jobs:
       - name: Checkout PR code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -32,111 +32,203 @@ jobs:
           cat > ai_review.py << 'SCRIPT_END'
           import os
           import sys
+          import json
+          import re
           from github import Github, Auth
           import google.generativeai as genai
 
-          print("🔍 Running AI Review...")
+          print("🔍 Starting AI Code Review...")
 
-          # Configure Gemini API
+          # Configure APIs
           genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-          
-          # Configure GitHub API with new Auth method
           auth = Auth.Token(os.getenv("GITHUB_TOKEN"))
           g = Github(auth=auth)
 
           # Get PR details
           repo = g.get_repo(os.getenv("REPO_NAME"))
           pr = repo.get_pull(int(os.getenv("PR_NUMBER")))
+          commit = list(pr.get_commits())[-1]
 
-          # Collect changed code
-          changed_code = ""
-          file_count = 0
+          # Collect file changes
+          files_to_review = []
           total_additions = 0
           total_deletions = 0
 
           for f in pr.get_files():
-              file_count += 1
-              total_additions += f.additions
-              total_deletions += f.deletions
-              
-              patch = f.patch or ""
-              if patch:
-                  changed_code += f"### File: {f.filename}\n```diff\n{patch}\n```\n\n"
+              if f.patch:  # Only review files with changes
+                  total_additions += f.additions
+                  total_deletions += f.deletions
+                  files_to_review.append({
+                      'filename': f.filename,
+                      'patch': f.patch,
+                      'sha': f.sha,
+                      'status': f.status
+                  })
 
-          # Check if there are changes to review
-          if not changed_code:
-              print("No code changes to review")
+          if not files_to_review:
+              print("No files to review")
               sys.exit(0)
 
-          # Limit the diff size for free tier token limits
-          if len(changed_code) > 20000:
-              changed_code = changed_code[:20000] + "\n\n... (diff truncated due to size)"
+          print(f"📊 Found {len(files_to_review)} files to review")
 
-          prompt = f"""You are an expert code reviewer. Review this PR diff and provide actionable feedback.
+          # Prepare prompt for Gemini
+          prompt = f"""You are an expert code reviewer. Analyze the following code changes and provide SPECIFIC inline suggestions.
 
-          Focus on:
-          - 🐛 **Bugs**: Logic errors, potential crashes, edge cases
-          - 🔒 **Security**: Vulnerabilities, unsafe practices
-          - ⚡ **Performance**: Inefficiencies, optimization opportunities
-          - 🎨 **Code Quality**: Naming, structure, best practices
+          IMPORTANT: Return your response as a valid JSON array with this exact structure:
+          [
+            {{
+              "filename": "path/to/file.ext",
+              "line": <line_number>,
+              "severity": "error|warning|info",
+              "message": "Brief description of the issue",
+              "suggestion": "The exact code to replace the problematic line (optional)"
+            }}
+          ]
 
-          Be concise but specific. For each issue, mention:
-          1. What the problem is
-          2. Which file/line it affects
-          3. How to fix it
+          Rules:
+          1. Use "error" for bugs and critical issues
+          2. Use "warning" for potential problems, security issues, performance
+          3. Use "info" for style improvements and best practices
+          4. Line numbers must be from the NEW file (lines starting with + in the diff)
+          5. Only suggest changes for added or modified lines
+          6. If suggesting code, provide the EXACT replacement code
+          7. Focus on actual problems, not minor style preferences
+          8. Maximum 3-5 suggestions per file to avoid overwhelming
 
-          PR Statistics:
-          - Files changed: {file_count}
-          - Lines added: {total_additions}
-          - Lines deleted: {total_deletions}
-
-          PR Diff:
-          {changed_code}
+          Files to review:
           """
 
+          for file_data in files_to_review:
+              prompt += f"\n\n=== File: {file_data['filename']} ===\n"
+              prompt += f"Status: {file_data['status']}\n"
+              prompt += f"```diff\n{file_data['patch']}\n```"
+
+          prompt += "\n\nProvide ONLY the JSON array, no other text or markdown."
+
           try:
-              # Use the correct model for free tier - gemini-2.5-flash
+              # Get AI suggestions
               model = genai.GenerativeModel("models/gemini-2.5-flash")
-              
               response = model.generate_content(prompt)
               
-              # Format the comment
-              comment = f"""### 🤖 AI Code Review (Gemini 2.5 Flash)
+              # Parse response
+              response_text = response.text.strip()
+              # Remove markdown code blocks if present
+              response_text = re.sub(r'^```json\s*', '', response_text)
+              response_text = re.sub(r'\s*```$', '', response_text)
+              
+              suggestions = json.loads(response_text)
+              
+              if not suggestions:
+                  print("No suggestions from AI")
+                  sys.exit(0)
+              
+              print(f"💡 Got {len(suggestions)} suggestions")
+              
+              # Create review comments
+              review_comments = []
+              
+              for suggestion in suggestions:
+                  filename = suggestion['filename']
+                  line = suggestion['line']
+                  message = suggestion['message']
+                  severity = suggestion.get('severity', 'info')
+                  code_suggestion = suggestion.get('suggestion', '')
+                  
+                  # Find the file in PR files
+                  pr_file = None
+                  for f in pr.get_files():
+                      if f.filename == filename:
+                          pr_file = f
+                          break
+                  
+                  if not pr_file:
+                      print(f"⚠️ File {filename} not found in PR")
+                      continue
+                  
+                  # Map severity to emoji
+                  emoji_map = {
+                      'error': '🔴',
+                      'warning': '⚠️',
+                      'info': '💡'
+                  }
+                  emoji = emoji_map.get(severity, '💡')
+                  
+                  # Format comment body
+                  if code_suggestion:
+                      # GitHub suggestion format
+                      body = f"{emoji} **{message}**\n\n```suggestion\n{code_suggestion}\n```"
+                  else:
+                      body = f"{emoji} **{message}**"
+                  
+                  review_comments.append({
+                      'path': filename,
+                      'line': int(line),
+                      'body': body
+                  })
+              
+              if not review_comments:
+                  print("No valid comments to post")
+                  sys.exit(0)
+              
+              # Create a review with all comments
+              print(f"📝 Creating review with {len(review_comments)} comments...")
+              
+              # Sort comments by file and line for better organization
+              review_comments.sort(key=lambda x: (x['path'], x['line']))
+              
+              # Create the review
+              review = pr.create_review(
+                  commit=commit,
+                  body="🤖 **AI Code Review by Gemini 2.5**\n\nI've analyzed your code and left inline suggestions. Click on the suggestions to apply them directly!",
+                  event='COMMENT',
+                  comments=review_comments
+              )
+              
+              print("✅ Review posted successfully!")
+              
+              # Post summary comment
+              error_count = sum(1 for s in suggestions if s.get('severity') == 'error')
+              warning_count = sum(1 for s in suggestions if s.get('severity') == 'warning')
+              info_count = sum(1 for s in suggestions if s.get('severity') == 'info')
+              
+              summary = f"""### 📊 AI Review Summary
 
-          **PR Summary:** {file_count} file(s) changed (+{total_additions} / -{total_deletions} lines)
+          **Files reviewed:** {len(files_to_review)}
+          **Lines changed:** +{total_additions} / -{total_deletions}
 
-          ---
+          **Issues found:**
+          - 🔴 Errors: {error_count}
+          - ⚠️ Warnings: {warning_count}
+          - 💡 Suggestions: {info_count}
+
+          Check the inline comments above for detailed feedback and click "Apply suggestion" to accept the changes!
+          """
+              
+              pr.create_issue_comment(summary)
+              
+          except json.JSONDecodeError as e:
+              print(f"❌ Failed to parse AI response as JSON: {e}")
+              print(f"Response was: {response_text[:500]}...")
+              
+              # Fallback to simple comment
+              pr.create_issue_comment(f"""### 🤖 AI Code Review
+
+          Unable to generate inline suggestions. Here's the raw review:
 
           {response.text}
 
-          ---
-
-          *This is an automated review. Please verify suggestions before implementing.*
-          *React with 👍 if helpful, 👎 if not useful.*
-          """
-              
-              pr.create_issue_comment(comment)
-              print("✅ AI Review posted successfully!")
+          **Files:** {len(files_to_review)} (+{total_additions}/-{total_deletions} lines)
+          """)
+              sys.exit(1)
               
           except Exception as e:
-              print(f"❌ Error during review: {str(e)}")
-              # Post a simple comment if AI review fails
-              fallback_comment = f"""### 🤖 AI Code Review
+              print(f"❌ Error: {str(e)}")
+              pr.create_issue_comment(f"""### 🤖 AI Code Review
 
-          Unable to generate detailed AI review.
-          
-          **PR Summary:** {file_count} file(s) changed (+{total_additions} / -{total_deletions} lines)
+          Review failed: {str(e)[:200]}
 
-          Manual review checklist:
-          - [ ] No critical bugs or logic errors
-          - [ ] No security vulnerabilities  
-          - [ ] Performance is acceptable
-          - [ ] Code follows project standards
-          - [ ] Tests are included/updated
-          
-          Error details: {str(e)[:200]}
-          """
-              pr.create_issue_comment(fallback_comment)
+          **Files:** {len(files_to_review)} (+{total_additions}/-{total_deletions} lines)
+          """)
               sys.exit(1)
           SCRIPT_END
 
