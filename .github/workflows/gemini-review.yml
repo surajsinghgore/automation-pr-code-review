@@ -1,0 +1,27 @@
+name: Gemini PR Code Reviewer
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+jobs:
+  code-review:
+    runs-on: ubuntu-latest
+    
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Gemini AI Code Review
+        uses: xh-dev-lab/gemini-ai-code-reviewer@v1
+        with:
+          gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          gemini_model: "gemini-2.0-flash-exp"
+          extra_prompt: "As an expert code reviewer, analyze this code for: 1) Logic errors and bugs, 2) Security vulnerabilities, 3) Performance issues, 4) Code quality and best practices, 5) Potential improvements. Be constructive and specific with examples."
