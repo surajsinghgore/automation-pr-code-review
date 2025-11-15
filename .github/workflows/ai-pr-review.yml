@@ -1,0 +1,53 @@
+name: AI Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  ai_review:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 1 — Checkout PR Code
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      # Step 2 — Get PR diff
+      - name: Get PR Diff
+        id: diff
+        run: |
+          git fetch origin ${{ github.base_ref }}
+          git diff origin/${{ github.base_ref }}...HEAD > pr_diff.txt
+
+      # Step 3 — Install curl + jq
+      - name: Install tools
+        run: sudo apt-get install -y jq
+
+      # Step 4 — Send diff to Gemini API and receive review
+      - name: AI Code Review using Gemini API
+        id: review
+        run: |
+          REVIEW=$(curl -s -X POST \
+            -H "Content-Type: application/json" \
+            -H "x-goog-api-key: ${{ secrets.GEMINI_API_KEY }}" \
+            -d @<(cat <<EOF
+          {
+            "contents": [{
+              "parts":[{
+                "text": "You are a senior software engineer. Review this PR diff and provide issues, improvements, bugs, and suggestions:\n\n$(cat pr_diff.txt)"
+              }]
+            }]
+          }
+          EOF
+          ) \
+          https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent | jq -r '.candidates[0].content.parts[0].text')
+
+          echo "$REVIEW" > review.md
+
+      # Step 5 — Post AI review as PR comment
+      - name: Comment on PR
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: AI Code Review
+          path: review.md
