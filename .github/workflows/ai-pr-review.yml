@@ -1,16 +1,13 @@
 name: AI Code Review
 
 on:
-  # Run when PR is created, updated, or reopened
   pull_request:
     types: [opened, synchronize, reopened]
 
-  # Run on ANY push (so workflow automatically re-runs when you fix errors)
   push:
     branches:
       - "**"
 
-  # Allow manual run
   workflow_dispatch:
 
 jobs:
@@ -18,34 +15,26 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. Checkout PR or push branch
       - name: Checkout repository
         uses: actions/checkout@v3
 
-      # 2. Detect correct diff base
-      - name: Determine base ref
+      # Detect correct refs
+      - name: Determine base
         id: refs
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             echo "base_ref=${{ github.base_ref }}" >> $GITHUB_OUTPUT
-            echo "head_ref=${{ github.head_ref }}" >> $GITHUB_OUTPUT
           else
-            # For push events (no PR), compare with previous commit
             echo "base_ref=HEAD~1" >> $GITHUB_OUTPUT
-            echo "head_ref=HEAD" >> $GITHUB_OUTPUT
           fi
 
-      # 3. Get diff safely
-      - name: Get PR Diff
+      # Generate diff
+      - name: Generate diff
         run: |
-          echo "Base: ${{ steps.refs.outputs.base_ref }}"
-          echo "Head: ${{ steps.refs.outputs.head_ref }}"
-
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             git fetch origin ${{ github.base_ref }} || true
             git diff origin/${{ github.base_ref }}...HEAD > pr_diff.txt || true
           else
-            # Push event diff
             git diff HEAD~1 HEAD > pr_diff.txt || true
           fi
 
@@ -53,39 +42,38 @@ jobs:
           cat pr_diff.txt
           echo "=== DIFF END ==="
 
-      # 4. Install JSON parser
       - name: Install jq
         run: sudo apt-get install -y jq
 
-      # 5. AI Review using Gemini API
+      # AI Review using Gemini
       - name: AI Code Review using Gemini API
         id: review
         run: |
           DIFF_CONTENT=$(cat pr_diff.txt)
 
           if [ -z "$DIFF_CONTENT" ]; then
-            echo "No changes found to review." > review.md
+            echo "No diff to review" > review.md
             exit 0
           fi
+
+          # Build JSON payload safely
+          PAYLOAD=$(printf '%s' \
+          "{
+            \"contents\": [{
+              \"parts\": [{
+                \"text\": \"Review this diff as a senior engineer. Identify bugs, issues, improvements, security concerns:\n\n$DIFF_CONTENT\"
+              }]
+            }]
+          }")
 
           RESPONSE=$(curl -s -X POST \
             -H "Content-Type: application/json" \
             -H "x-goog-api-key: ${{ secrets.GEMINI_API_KEY }}" \
-            -d @<(cat <<EOF
-          {
-            "contents": [{
-              "parts":[{
-                "text": "Act as a senior software engineer. Review this diff and point out issues, bugs, improvements, security concerns, and optimized fixes:\n\n$DIFF_CONTENT"
-              }]
-            }]
-          }
-EOF
-            ) \
+            -d "$PAYLOAD" \
             https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent)
 
           echo "$RESPONSE" | jq -r '.candidates[0].content.parts[0].text' > review.md
 
-      # 6. Post review as PR comment (only if it's a PR)
       - name: Comment on Pull Request
         if: github.event_name == 'pull_request'
         uses: marocchino/sticky-pull-request-comment@v2
